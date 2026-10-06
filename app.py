@@ -25,7 +25,12 @@ from werkzeug.utils import secure_filename
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "vault.db")
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
-PASSWORD = os.getenv("VAULT_PASSWORD")
+PASSWORD = os.getenv("VAULT_PASSWORD")              # members: add and view
+ADMIN_PASSWORD = os.getenv("VAULT_ADMIN_PASSWORD")  # admins: add, view and delete
+# Local-only: skip the login when no password is set. Only honoured on
+# 127.0.0.1, so a hosted copy with no password still refuses to start.
+# Local-open users are treated as admins, since it's your own PC.
+LOCAL_OPEN = os.getenv("VAULT_LOCAL_OPEN") == "1" and not (PASSWORD or ADMIN_PASSWORD)
 
 app = Flask(__name__)
 app.secret_key = os.getenv("VAULT_SECRET_KEY") or secrets.token_hex(32)
@@ -52,6 +57,14 @@ def init_db():
                 description TEXT,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS apps (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                url TEXT NOT NULL,
+                department TEXT,
+                description TEXT,
+                created_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS dashboards (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 title TEXT NOT NULL,
@@ -62,11 +75,31 @@ def init_db():
                 created_at TEXT NOT NULL
             );
         """)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(dashboards)")]
+        if "url" not in cols:
+            conn.execute("ALTER TABLE dashboards ADD COLUMN url TEXT")
     os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
 def logged_in():
-    return session.get("ok") is True
+    return LOCAL_OPEN or session.get("ok") is True
+
+
+def is_admin():
+    return LOCAL_OPEN or session.get("role") == "admin"
+
+
+def require_admin(view):
+    from functools import wraps
+
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if not is_admin():
+            flash("Only admins can delete items.")
+            return redirect(url_for("home"))
+        return view(*args, **kwargs)
+
+    return wrapped
 
 
 def require_login(view):
@@ -83,116 +116,202 @@ def require_login(view):
 
 PAGE = """
 <!doctype html>
-<html lang="en"><head>
+<html lang="en">
+<head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Bathla Vault</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = { theme: { extend: {
+    colors: {
+      background: 'hsl(var(--background))', foreground: 'hsl(var(--foreground))',
+      card: 'hsl(var(--card))', 'card-foreground': 'hsl(var(--card-foreground))',
+      muted: 'hsl(var(--muted))', 'muted-foreground': 'hsl(var(--muted-foreground))',
+      primary: 'hsl(var(--primary))', 'primary-foreground': 'hsl(var(--primary-foreground))',
+      border: 'hsl(var(--border))', input: 'hsl(var(--input))', ring: 'hsl(var(--ring))',
+      destructive: 'hsl(var(--destructive))'
+    },
+    borderRadius: { lg: 'var(--radius)', md: 'calc(var(--radius) - 2px)', sm: 'calc(var(--radius) - 4px)' }
+  } } };
+</script>
 <style>
-  :root { --bg:#f6f5f2; --card:#ffffff; --ink:#2b2b28; --muted:#7a776f; --line:#e4e1da; --accent:#5b6b5e; }
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) { --bg:#1f1f1d; --card:#2a2a27; --ink:#e9e7e1; --muted:#9b978d; --line:#3a3a36; --accent:#8fa294; }
+  /* shadcn/ui "zinc" theme tokens: light by default, dark when the system asks for it. */
+  :root {
+    --background: 0 0% 100%; --foreground: 240 10% 3.9%;
+    --card: 0 0% 100%; --card-foreground: 240 10% 3.9%;
+    --muted: 240 4.8% 95.9%; --muted-foreground: 240 3.8% 46.1%;
+    --primary: 240 5.9% 10%; --primary-foreground: 0 0% 98%;
+    --border: 240 5.9% 90%; --input: 240 5.9% 90%; --ring: 240 5.9% 10%;
+    --destructive: 0 84.2% 60.2%; --radius: 0.5rem;
   }
-  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif; }
-  main { max-width:1000px; margin:0 auto; padding:24px 16px 48px; }
-  header { display:flex; justify-content:space-between; align-items:center; margin-bottom:24px; }
-  h1 { font-size:22px; margin:0; font-weight:600; }
-  h2 { font-size:17px; margin:32px 0 12px; font-weight:600; }
-  a { color:var(--accent); }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:12px; }
-  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:12px; }
-  .meta { color:var(--muted); font-size:13px; }
-  form.add { display:grid; gap:8px; grid-template-columns:1fr 1fr; }
-  form.add .full { grid-column:1 / -1; }
-  input, textarea, button { font:inherit; padding:8px 10px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--ink); box-sizing:border-box; width:100%; }
-  button { background:var(--accent); color:#fff; border:none; cursor:pointer; width:auto; padding:8px 16px; }
-  .danger { background:none; color:var(--muted); padding:0; font-size:13px; text-decoration:underline; }
-  .flash { padding:10px 12px; border-radius:8px; background:var(--card); border:1px solid var(--line); margin-bottom:16px; }
-  .narrow { max-width:360px; margin:12vh auto 0; }
-  @media (max-width:600px) { form.add { grid-template-columns:1fr; } }
-</style></head>
-<body><main>
-{% with msgs = get_flashed_messages() %}{% for m in msgs %}<div class="flash">{{ m }}</div>{% endfor %}{% endwith %}
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --background: 240 10% 3.9%; --foreground: 0 0% 98%;
+      --card: 240 10% 3.9%; --card-foreground: 0 0% 98%;
+      --muted: 240 3.7% 15.9%; --muted-foreground: 240 5% 64.9%;
+      --primary: 0 0% 98%; --primary-foreground: 240 5.9% 10%;
+      --border: 240 3.7% 15.9%; --input: 240 3.7% 15.9%; --ring: 240 4.9% 83.9%;
+      --destructive: 0 62.8% 30.6%;
+    }
+  }
+  body { background: hsl(var(--background)); color: hsl(var(--foreground)); font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+</style>
+</head>
+<body class="antialiased">
+<main class="mx-auto max-w-5xl px-4 py-8">
+{% with msgs = get_flashed_messages() %}{% for m in msgs %}
+  <div class="mb-6 rounded-md border bg-muted px-4 py-3 text-sm">{{ m }}</div>
+{% endfor %}{% endwith %}
 {{ body|safe }}
-</main></body></html>
+</main>
+</body>
+</html>
 """
 
 
 def page(body, **ctx):
+    ctx.setdefault("admin", is_admin())
     return render_template_string(PAGE, body=render_template_string(body, **ctx))
 
 
+# shadcn/ui class sets, filled into the templates below.
+TOKENS = {
+    "__BTN__": "inline-flex h-9 items-center justify-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground shadow hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+    "__INPUT__": "flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+    "__CARD__": "rounded-lg border bg-card text-card-foreground shadow-sm",
+    "__GHOST__": "text-sm text-muted-foreground underline-offset-4 hover:text-destructive hover:underline",
+    "__BADGE__": "rounded-md border px-2 py-0.5 text-xs font-medium text-muted-foreground",
+}
+
 LOGIN_BODY = """
-<div class="narrow card">
-  <h1>Bathla Vault</h1>
-  <form method="post" style="margin-top:16px;display:grid;gap:8px">
-    <input type="password" name="password" placeholder="Password" autofocus required>
-    <button type="submit">Enter</button>
+<div class="mx-auto mt-24 max-w-sm __CARD__ p-6">
+  <h1 class="text-lg font-semibold tracking-tight">Bathla Vault</h1>
+  <p class="mt-1 text-sm text-muted-foreground">Enter the password to continue.</p>
+  <form method="post" class="mt-6 grid gap-3">
+    <input class="__INPUT__" type="password" name="password" placeholder="Password" autofocus required>
+    <button class="__BTN__" type="submit">Enter</button>
   </form>
 </div>
 """
 
 HOME_BODY = """
-<header>
-  <h1>Bathla Vault</h1>
-  <a href="{{ url_for('logout') }}">Log out</a>
+<header class="mb-8 flex items-center justify-between">
+  <div>
+    <h1 class="text-2xl font-semibold tracking-tight">Bathla Vault</h1>
+    <p class="text-sm text-muted-foreground">Company sheets and dashboards in one place.</p>
+  </div>
+  <div class="flex items-center gap-3">
+    <span class="__BADGE__">{% if admin %}Admin{% else %}Member{% endif %}</span>
+    <a class="text-sm text-muted-foreground hover:text-foreground" href="{{ url_for('logout') }}">Log out</a>
+  </div>
 </header>
 
-<h2>Sheets</h2>
-<div class="grid">
-{% for s in sheets %}
-  <div class="card">
-    <a href="{{ s['url'] }}" target="_blank" rel="noopener"><strong>{{ s['title'] }}</strong></a>
-    <div class="meta">{{ s['department'] or '-' }} · {{ s['owner'] or '-' }}</div>
-    {% if s['description'] %}<div class="meta">{{ s['description'] }}</div>{% endif %}
-    <form method="post" action="{{ url_for('delete_sheet', sid=s['id']) }}" style="margin-top:8px">
-      <button class="danger" type="submit" onclick="return confirm('Remove this sheet from the vault? (The Google Sheet itself is not deleted.)')">Remove</button>
-    </form>
+<section class="mb-10">
+  <div class="mb-4 flex items-baseline justify-between">
+    <h2 class="text-lg font-semibold tracking-tight">Sheets</h2>
+    <span class="text-sm text-muted-foreground">{{ sheets|length }} attached</span>
   </div>
-{% else %}<div class="meta">No sheets attached yet.</div>{% endfor %}
-</div>
-<div class="card" style="margin-top:12px">
-  <form class="add" method="post" action="{{ url_for('add_sheet') }}">
-    <input class="full" name="url" placeholder="Google Sheet link" required>
-    <input name="title" placeholder="Title (e.g. Blinkit DRR Tracker)" required>
-    <input name="department" placeholder="Department">
-    <input name="owner" placeholder="Owner">
-    <input class="full" name="description" placeholder="What is this sheet for? (optional)">
-    <div class="full"><button type="submit">Attach sheet</button></div>
+  <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+  {% for s in sheets %}
+    <div class="__CARD__ flex flex-col p-5">
+      <div class="flex items-start justify-between gap-2">
+        <a class="font-medium underline-offset-4 hover:underline" href="{{ s['url'] }}" target="_blank" rel="noopener">{{ s['title'] }}</a>
+        {% if s['department'] %}<span class="__BADGE__">{{ s['department'] }}</span>{% endif %}
+      </div>
+      {% if s['description'] %}<p class="mt-2 text-sm text-muted-foreground">{{ s['description'] }}</p>{% endif %}
+    {% if admin %}<div class="mt-auto pt-4">
+        <form method="post" action="{{ url_for('delete_sheet', sid=s['id']) }}">
+          <button class="__GHOST__" type="submit" onclick="return confirm('Remove this sheet from the vault? (The Google Sheet itself is not deleted.)')">Remove</button>
+        </form>
+      </div>{% endif %}
+    </div>
+  {% else %}<p class="text-sm text-muted-foreground">No sheets attached yet.</p>{% endfor %}
+  </div>
+  <form class="__CARD__ mt-4 grid gap-3 p-5 sm:grid-cols-2" method="post" action="{{ url_for('add_sheet') }}">
+    <p class="text-sm font-medium sm:col-span-2">Attach a sheet</p>
+    <input class="__INPUT__ sm:col-span-2" name="url" placeholder="Google Sheet link" required>
+    <input class="__INPUT__" name="title" placeholder="Title (e.g. Blinkit DRR Tracker)" required>
+    <input class="__INPUT__" name="department" placeholder="Department">
+    <input class="__INPUT__ sm:col-span-2" name="description" placeholder="What is this sheet for? (optional)">
+    <input class="__INPUT__" name="owner" placeholder="Owner (optional)">
+    <div class="sm:col-span-2"><button class="__BTN__" type="submit">Attach sheet</button></div>
   </form>
-</div>
+</section>
 
-<h2>Dashboards</h2>
-<div class="grid">
-{% for d in dashboards %}
-  <div class="card">
-    <a href="{{ url_for('view_dashboard', did=d['id']) }}" target="_blank"><strong>{{ d['title'] }}</strong></a>
-    <div class="meta">{{ d['department'] or '-' }} · {{ d['owner'] or '-' }} · {{ d['created_at'][:10] }}</div>
-    {% if d['description'] %}<div class="meta">{{ d['description'] }}</div>{% endif %}
-    <form method="post" action="{{ url_for('delete_dashboard', did=d['id']) }}" style="margin-top:8px">
-      <button class="danger" type="submit" onclick="return confirm('Delete this dashboard permanently?')">Delete</button>
-    </form>
+<section class="mb-10">
+  <div class="mb-4 flex items-baseline justify-between">
+    <h2 class="text-lg font-semibold tracking-tight">Apps</h2>
+    <span class="text-sm text-muted-foreground">{{ apps|length }} projects</span>
   </div>
-{% else %}<div class="meta">No dashboards uploaded yet.</div>{% endfor %}
-</div>
-<div class="card" style="margin-top:12px">
-  <form class="add" method="post" action="{{ url_for('upload_dashboard') }}" enctype="multipart/form-data">
-    <input class="full" type="file" name="file" accept=".html,text/html" required>
-    <input name="title" placeholder="Dashboard title" required>
-    <input name="department" placeholder="Department">
-    <input name="owner" placeholder="Your name" required>
-    <input class="full" name="description" placeholder="What does it show? (optional)">
-    <div class="full"><button type="submit">Upload dashboard</button>
-    <span class="meta">Single .html file, up to 20 MB.</span></div>
+  <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+  {% for a in apps %}
+    <div class="__CARD__ flex flex-col p-5">
+      <div class="flex items-start justify-between gap-2">
+        <a class="font-medium underline-offset-4 hover:underline" href="{{ a['url'] }}" target="_blank" rel="noopener">{{ a['title'] }}</a>
+        {% if a['department'] %}<span class="__BADGE__">{{ a['department'] }}</span>{% endif %}
+      </div>
+      {% if a['description'] %}<p class="mt-2 text-sm text-muted-foreground">{{ a['description'] }}</p>{% endif %}
+    {% if admin %}<div class="mt-auto pt-4">
+        <form method="post" action="{{ url_for('delete_app', aid=a['id']) }}">
+          <button class="__GHOST__" type="submit" onclick="return confirm('Remove this app from the vault? (The project itself is not deleted.)')">Remove</button>
+        </form>
+      </div>{% endif %}
+    </div>
+  {% else %}<p class="text-sm text-muted-foreground">No apps added yet.</p>{% endfor %}
+  </div>
+</section>
+
+<section>
+  <div class="mb-4 flex items-baseline justify-between">
+    <h2 class="text-lg font-semibold tracking-tight">Dashboards</h2>
+    <span class="text-sm text-muted-foreground">{{ dashboards|length }} uploaded</span>
+  </div>
+  <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+  {% for d in dashboards %}
+    <div class="__CARD__ flex flex-col p-5">
+      <div class="flex items-start justify-between gap-2">
+        <a class="font-medium underline-offset-4 hover:underline" href="{{ d['url'] or url_for('view_dashboard', did=d['id']) }}" target="_blank" rel="noopener">{{ d['title'] }}</a>
+        {% if d['department'] %}<span class="__BADGE__">{{ d['department'] }}</span>{% endif %}
+      </div>
+      {% if d['description'] %}<p class="mt-2 text-sm text-muted-foreground">{{ d['description'] }}</p>{% endif %}
+      <p class="mt-2 text-xs text-muted-foreground">{% if d['owner'] %}{{ d['owner'] }} · {% endif %}{{ d['created_at'][:10] }}</p>
+    {% if admin %}<div class="mt-auto pt-4">
+        <form method="post" action="{{ url_for('delete_dashboard', did=d['id']) }}">
+          <button class="__GHOST__" type="submit" onclick="return confirm('Delete this dashboard permanently?')">Delete</button>
+        </form>
+      </div>{% endif %}
+    </div>
+  {% else %}<p class="text-sm text-muted-foreground">No dashboards uploaded yet.</p>{% endfor %}
+  </div>
+  <form class="__CARD__ mt-4 grid gap-3 p-5 sm:grid-cols-2" method="post" action="{{ url_for('upload_dashboard') }}" enctype="multipart/form-data">
+    <p class="text-sm font-medium sm:col-span-2">Upload a dashboard</p>
+    <input class="__INPUT__ sm:col-span-2" type="file" name="file" accept=".html,text/html" required>
+    <input class="__INPUT__" name="title" placeholder="Dashboard title" required>
+    <input class="__INPUT__" name="department" placeholder="Department">
+    <input class="__INPUT__" name="owner" placeholder="Your name" required>
+    <input class="__INPUT__" name="description" placeholder="What does it show? (optional)">
+    <div class="flex items-center gap-3 sm:col-span-2">
+      <button class="__BTN__" type="submit">Upload dashboard</button>
+      <span class="text-xs text-muted-foreground">Single .html file, up to 20 MB.</span>
+    </div>
   </form>
-</div>
+</section>
 """
+
+for _k, _v in TOKENS.items():
+    LOGIN_BODY = LOGIN_BODY.replace(_k, _v)
+    HOME_BODY = HOME_BODY.replace(_k, _v)
 
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        given = request.form.get("password", "")
-        if hmac.compare_digest(given.encode(), PASSWORD.encode()):
-            session["ok"] = True
+        given = request.form.get("password", "").encode()
+        if ADMIN_PASSWORD and hmac.compare_digest(given, ADMIN_PASSWORD.encode()):
+            session.update(ok=True, role="admin")
+            return redirect(request.args.get("next") or url_for("home"))
+        if PASSWORD and hmac.compare_digest(given, PASSWORD.encode()):
+            session.update(ok=True, role="member")
             return redirect(request.args.get("next") or url_for("home"))
         flash("Wrong password.")
     return page(LOGIN_BODY)
@@ -210,7 +329,8 @@ def home():
     with db() as conn:
         sheets = conn.execute("SELECT * FROM sheets ORDER BY department, title").fetchall()
         dashboards = conn.execute("SELECT * FROM dashboards ORDER BY created_at DESC").fetchall()
-    return page(HOME_BODY, sheets=sheets, dashboards=dashboards)
+        apps = conn.execute("SELECT * FROM apps ORDER BY title").fetchall()
+    return page(HOME_BODY, sheets=sheets, dashboards=dashboards, apps=apps)
 
 
 @app.route("/sheets", methods=["POST"])
@@ -233,10 +353,38 @@ def add_sheet():
 
 @app.route("/sheets/<int:sid>/delete", methods=["POST"])
 @require_login
+@require_admin
 def delete_sheet(sid):
     with db() as conn:
         conn.execute("DELETE FROM sheets WHERE id = ?", (sid,))
     flash("Sheet removed from the vault.")
+    return redirect(url_for("home"))
+
+
+@app.route("/apps", methods=["POST"])
+@require_login
+def add_app():
+    url = request.form["url"].strip()
+    if not url.startswith(("http://", "https://")):
+        flash("App link must start with http:// or https://")
+        return redirect(url_for("home"))
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO apps (title, url, department, description, created_at) VALUES (?,?,?,?,?)",
+            (request.form["title"].strip(), url, request.form.get("department", "").strip(),
+             request.form.get("description", "").strip(), datetime.now().isoformat(timespec="seconds")),
+        )
+    flash("App added.")
+    return redirect(url_for("home"))
+
+
+@app.route("/apps/<int:aid>/delete", methods=["POST"])
+@require_login
+@require_admin
+def delete_app(aid):
+    with db() as conn:
+        conn.execute("DELETE FROM apps WHERE id = ?", (aid,))
+    flash("App removed from the vault.")
     return redirect(url_for("home"))
 
 
@@ -265,9 +413,11 @@ def upload_dashboard():
 @require_login
 def view_dashboard(did):
     with db() as conn:
-        row = conn.execute("SELECT filename FROM dashboards WHERE id = ?", (did,)).fetchone()
+        row = conn.execute("SELECT filename, url FROM dashboards WHERE id = ?", (did,)).fetchone()
     if not row:
         abort(404)
+    if row["url"]:
+        return redirect(row["url"])
     resp = send_from_directory(UPLOAD_DIR, row["filename"], mimetype="text/html")
     # Uploaded pages run their own scripts, but in a sandbox with a unique
     # origin: they cannot read the vault session cookie or call vault pages.
@@ -277,13 +427,14 @@ def view_dashboard(did):
 
 @app.route("/dashboards/<int:did>/delete", methods=["POST"])
 @require_login
+@require_admin
 def delete_dashboard(did):
     with db() as conn:
         row = conn.execute("SELECT filename FROM dashboards WHERE id = ?", (did,)).fetchone()
         if row:
             conn.execute("DELETE FROM dashboards WHERE id = ?", (did,))
-            path = os.path.join(UPLOAD_DIR, row["filename"])
-            if os.path.exists(path):
+            path = os.path.join(UPLOAD_DIR, row["filename"] or "")
+            if row["filename"] and os.path.exists(path):
                 os.remove(path)
     flash("Dashboard deleted.")
     return redirect(url_for("home"))
@@ -292,6 +443,6 @@ def delete_dashboard(did):
 init_db()
 
 if __name__ == "__main__":
-    if not PASSWORD:
-        raise SystemExit("Set VAULT_PASSWORD before starting the vault.")
+    if not (PASSWORD or ADMIN_PASSWORD or LOCAL_OPEN):
+        raise SystemExit("Set VAULT_PASSWORD and/or VAULT_ADMIN_PASSWORD, or VAULT_LOCAL_OPEN=1 for local use.")
     app.run(host="127.0.0.1", port=int(os.getenv("VAULT_PORT", "5050")), debug=False)
