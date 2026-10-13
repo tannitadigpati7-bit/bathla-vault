@@ -213,13 +213,13 @@ HOME_BODY = """
   </div>
   <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
   {% for s in sheets %}
-    <div class="__CARD__ flex flex-col p-5">
+    <div class="__CARD__ relative flex flex-col p-5 transition-colors hover:bg-muted/50">
       <div class="flex items-start justify-between gap-2">
-        <a class="font-medium underline-offset-4 hover:underline" href="{{ s['url'] }}" target="_blank" rel="noopener">{{ s['title'] }}</a>
+        <a class="font-medium underline-offset-4 after:absolute after:inset-0 after:content-[''] hover:underline" href="{{ s['url'] }}" target="_blank" rel="noopener">{{ s['title'] }}</a>
         {% if s['department'] %}<span class="__BADGE__">{{ s['department'] }}</span>{% endif %}
       </div>
       {% if s['description'] %}<p class="mt-2 text-sm text-muted-foreground">{{ s['description'] }}</p>{% endif %}
-    {% if admin %}<div class="mt-auto pt-4">
+    {% if admin %}<div class="relative z-10 mt-auto pt-4">
         <form method="post" action="{{ url_for('delete_sheet', sid=s['id']) }}">
           <button class="__GHOST__" type="submit" onclick="return confirm('Remove this sheet from the vault? (The Google Sheet itself is not deleted.)')">Remove</button>
         </form>
@@ -245,13 +245,13 @@ HOME_BODY = """
   </div>
   <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
   {% for a in apps %}
-    <div class="__CARD__ flex flex-col p-5">
+    <div class="__CARD__ relative flex flex-col p-5 transition-colors hover:bg-muted/50">
       <div class="flex items-start justify-between gap-2">
-        <a class="font-medium underline-offset-4 hover:underline" href="{{ a['url'] }}" target="_blank" rel="noopener">{{ a['title'] }}</a>
+        <a class="font-medium underline-offset-4 after:absolute after:inset-0 after:content-[''] hover:underline" href="{{ a['url'] }}" target="_blank" rel="noopener">{{ a['title'] }}</a>
         {% if a['department'] %}<span class="__BADGE__">{{ a['department'] }}</span>{% endif %}
       </div>
       {% if a['description'] %}<p class="mt-2 text-sm text-muted-foreground">{{ a['description'] }}</p>{% endif %}
-    {% if admin %}<div class="mt-auto pt-4">
+    {% if admin %}<div class="relative z-10 mt-auto pt-4">
         <form method="post" action="{{ url_for('delete_app', aid=a['id']) }}">
           <button class="__GHOST__" type="submit" onclick="return confirm('Remove this app from the vault? (The project itself is not deleted.)')">Remove</button>
         </form>
@@ -268,14 +268,14 @@ HOME_BODY = """
   </div>
   <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
   {% for d in dashboards %}
-    <div class="__CARD__ flex flex-col p-5">
+    <div class="__CARD__ relative flex flex-col p-5 transition-colors hover:bg-muted/50">
       <div class="flex items-start justify-between gap-2">
-        <a class="font-medium underline-offset-4 hover:underline" href="{{ d['url'] or url_for('view_dashboard', did=d['id']) }}" target="_blank" rel="noopener">{{ d['title'] }}</a>
+        <a class="font-medium underline-offset-4 after:absolute after:inset-0 after:content-[''] hover:underline" href="{{ d['url'] or url_for('view_dashboard', did=d['id']) }}" target="_blank" rel="noopener">{{ d['title'] }}</a>
         {% if d['department'] %}<span class="__BADGE__">{{ d['department'] }}</span>{% endif %}
       </div>
       {% if d['description'] %}<p class="mt-2 text-sm text-muted-foreground">{{ d['description'] }}</p>{% endif %}
       <p class="mt-2 text-xs text-muted-foreground">{% if d['owner'] %}{{ d['owner'] }} · {% endif %}{{ d['created_at'][:10] }}</p>
-    {% if admin %}<div class="mt-auto pt-4">
+    {% if admin %}<div class="relative z-10 mt-auto pt-4">
         <form method="post" action="{{ url_for('delete_dashboard', did=d['id']) }}">
           <button class="__GHOST__" type="submit" onclick="return confirm('Delete this dashboard permanently?')">Delete</button>
         </form>
