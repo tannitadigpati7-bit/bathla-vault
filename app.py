@@ -16,6 +16,7 @@ import os
 import re
 import secrets
 import sqlite3
+import time
 from datetime import datetime
 
 from flask import (Flask, abort, flash, redirect, render_template_string,
@@ -40,12 +41,34 @@ SHEET_ID_RE = re.compile(r"/spreadsheets/d/([a-zA-Z0-9_-]+)")
 
 
 def db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
+    # PythonAnywhere's free-tier disk is network-mounted, which makes SQLite
+    # writes occasionally fail with a transient lock/IO error. busy_timeout
+    # makes SQLite itself wait and retry a locked file for up to 10s; the
+    # run_with_retry() wrapper below covers failures past that.
+    conn.execute("PRAGMA busy_timeout = 10000")
     return conn
 
 
+def run_with_retry(func, attempts=3, delay=0.3):
+    """Run func() (which opens its own db() connection), retrying a couple
+    of times on the transient errors seen on PythonAnywhere's network
+    storage, instead of crashing the request on the first hiccup."""
+    for attempt in range(attempts):
+        try:
+            return func()
+        except (sqlite3.OperationalError, OSError):
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay)
+
+
 def init_db():
+    run_with_retry(_init_db)
+
+
+def _init_db():
     with db() as conn:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS sheets (
@@ -326,10 +349,14 @@ def logout():
 @app.route("/")
 @require_login
 def home():
-    with db() as conn:
-        sheets = conn.execute("SELECT * FROM sheets ORDER BY department, title").fetchall()
-        dashboards = conn.execute("SELECT * FROM dashboards ORDER BY created_at DESC").fetchall()
-        apps = conn.execute("SELECT * FROM apps ORDER BY title").fetchall()
+    def _read():
+        with db() as conn:
+            return (
+                conn.execute("SELECT * FROM sheets ORDER BY department, title").fetchall(),
+                conn.execute("SELECT * FROM dashboards ORDER BY created_at DESC").fetchall(),
+                conn.execute("SELECT * FROM apps ORDER BY title").fetchall(),
+            )
+    sheets, dashboards, apps = run_with_retry(_read)
     return page(HOME_BODY, sheets=sheets, dashboards=dashboards, apps=apps)
 
 
@@ -340,13 +367,15 @@ def add_sheet():
     if not SHEET_ID_RE.search(url):
         flash("That doesn't look like a Google Sheet link.")
         return redirect(url_for("home"))
-    with db() as conn:
-        conn.execute(
-            "INSERT INTO sheets (title, url, department, owner, description, created_at) VALUES (?,?,?,?,?,?)",
-            (request.form["title"].strip(), url, request.form.get("department", "").strip(),
-             request.form.get("owner", "").strip(), request.form.get("description", "").strip(),
-             datetime.now().isoformat(timespec="seconds")),
-        )
+    def _write():
+        with db() as conn:
+            conn.execute(
+                "INSERT INTO sheets (title, url, department, owner, description, created_at) VALUES (?,?,?,?,?,?)",
+                (request.form["title"].strip(), url, request.form.get("department", "").strip(),
+                 request.form.get("owner", "").strip(), request.form.get("description", "").strip(),
+                 datetime.now().isoformat(timespec="seconds")),
+            )
+    run_with_retry(_write)
     flash("Sheet attached.")
     return redirect(url_for("home"))
 
@@ -355,8 +384,10 @@ def add_sheet():
 @require_login
 @require_admin
 def delete_sheet(sid):
-    with db() as conn:
-        conn.execute("DELETE FROM sheets WHERE id = ?", (sid,))
+    def _write():
+        with db() as conn:
+            conn.execute("DELETE FROM sheets WHERE id = ?", (sid,))
+    run_with_retry(_write)
     flash("Sheet removed from the vault.")
     return redirect(url_for("home"))
 
@@ -368,12 +399,14 @@ def add_app():
     if not url.startswith(("http://", "https://")):
         flash("App link must start with http:// or https://")
         return redirect(url_for("home"))
-    with db() as conn:
-        conn.execute(
-            "INSERT INTO apps (title, url, department, description, created_at) VALUES (?,?,?,?,?)",
-            (request.form["title"].strip(), url, request.form.get("department", "").strip(),
-             request.form.get("description", "").strip(), datetime.now().isoformat(timespec="seconds")),
-        )
+    def _write():
+        with db() as conn:
+            conn.execute(
+                "INSERT INTO apps (title, url, department, description, created_at) VALUES (?,?,?,?,?)",
+                (request.form["title"].strip(), url, request.form.get("department", "").strip(),
+                 request.form.get("description", "").strip(), datetime.now().isoformat(timespec="seconds")),
+            )
+    run_with_retry(_write)
     flash("App added.")
     return redirect(url_for("home"))
 
@@ -382,8 +415,10 @@ def add_app():
 @require_login
 @require_admin
 def delete_app(aid):
-    with db() as conn:
-        conn.execute("DELETE FROM apps WHERE id = ?", (aid,))
+    def _write():
+        with db() as conn:
+            conn.execute("DELETE FROM apps WHERE id = ?", (aid,))
+    run_with_retry(_write)
     flash("App removed from the vault.")
     return redirect(url_for("home"))
 
@@ -398,13 +433,15 @@ def upload_dashboard():
     created = datetime.now()
     stored = f"{created:%Y%m%d%H%M%S%f}_{secure_filename(f.filename)}"
     f.save(os.path.join(UPLOAD_DIR, stored))
-    with db() as conn:
-        conn.execute(
-            "INSERT INTO dashboards (title, owner, department, description, filename, created_at) VALUES (?,?,?,?,?,?)",
-            (request.form["title"].strip(), request.form.get("owner", "").strip(),
-             request.form.get("department", "").strip(), request.form.get("description", "").strip(),
-             stored, created.isoformat(timespec="seconds")),
-        )
+    def _write():
+        with db() as conn:
+            conn.execute(
+                "INSERT INTO dashboards (title, owner, department, description, filename, created_at) VALUES (?,?,?,?,?,?)",
+                (request.form["title"].strip(), request.form.get("owner", "").strip(),
+                 request.form.get("department", "").strip(), request.form.get("description", "").strip(),
+                 stored, created.isoformat(timespec="seconds")),
+            )
+    run_with_retry(_write)
     flash("Dashboard uploaded.")
     return redirect(url_for("home"))
 
@@ -412,8 +449,10 @@ def upload_dashboard():
 @app.route("/dashboards/<int:did>")
 @require_login
 def view_dashboard(did):
-    with db() as conn:
-        row = conn.execute("SELECT filename, url FROM dashboards WHERE id = ?", (did,)).fetchone()
+    def _read():
+        with db() as conn:
+            return conn.execute("SELECT filename, url FROM dashboards WHERE id = ?", (did,)).fetchone()
+    row = run_with_retry(_read)
     if not row:
         abort(404)
     if row["url"]:
@@ -429,13 +468,15 @@ def view_dashboard(did):
 @require_login
 @require_admin
 def delete_dashboard(did):
-    with db() as conn:
-        row = conn.execute("SELECT filename FROM dashboards WHERE id = ?", (did,)).fetchone()
-        if row:
-            conn.execute("DELETE FROM dashboards WHERE id = ?", (did,))
-            path = os.path.join(UPLOAD_DIR, row["filename"] or "")
-            if row["filename"] and os.path.exists(path):
-                os.remove(path)
+    def _write():
+        with db() as conn:
+            row = conn.execute("SELECT filename FROM dashboards WHERE id = ?", (did,)).fetchone()
+            if row:
+                conn.execute("DELETE FROM dashboards WHERE id = ?", (did,))
+                path = os.path.join(UPLOAD_DIR, row["filename"] or "")
+                if row["filename"] and os.path.exists(path):
+                    os.remove(path)
+    run_with_retry(_write)
     flash("Dashboard deleted.")
     return redirect(url_for("home"))
 
