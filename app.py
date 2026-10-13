@@ -307,15 +307,17 @@ HOME_BODY = """
   {% else %}<p class="text-sm text-muted-foreground">No dashboards uploaded yet.</p>{% endfor %}
   </div>
   <form class="__CARD__ mt-4 grid gap-3 p-5 sm:grid-cols-2" method="post" action="{{ url_for('upload_dashboard') }}" enctype="multipart/form-data">
-    <p class="text-sm font-medium sm:col-span-2">Upload a dashboard</p>
-    <input class="__INPUT__ sm:col-span-2" type="file" name="file" accept=".html,text/html" required>
+    <p class="text-sm font-medium sm:col-span-2">Add a dashboard</p>
+    <p class="text-xs text-muted-foreground sm:col-span-2">Give a link for one that keeps updating on its own (e.g. Apps Script, Looker Studio), or upload a file for a one-off static page. Not both.</p>
+    <input class="__INPUT__ sm:col-span-2" name="url" placeholder="Live dashboard link (optional)">
+    <input class="__INPUT__ sm:col-span-2" type="file" name="file" accept=".html,text/html">
     <input class="__INPUT__" name="title" placeholder="Dashboard title" required>
     <input class="__INPUT__" name="department" placeholder="Department">
     <input class="__INPUT__" name="owner" placeholder="Your name" required>
     <input class="__INPUT__" name="description" placeholder="What does it show? (optional)">
     <div class="flex items-center gap-3 sm:col-span-2">
-      <button class="__BTN__" type="submit">Upload dashboard</button>
-      <span class="text-xs text-muted-foreground">Single .html file, up to 20 MB.</span>
+      <button class="__BTN__" type="submit">Add dashboard</button>
+      <span class="text-xs text-muted-foreground">File upload: single .html, up to 20 MB.</span>
     </div>
   </form>
 </section>
@@ -426,23 +428,37 @@ def delete_app(aid):
 @app.route("/dashboards", methods=["POST"])
 @require_login
 def upload_dashboard():
+    # Either a live link (for a dashboard that keeps updating on its own,
+    # e.g. Apps Script) or an uploaded static .html file, not both.
+    link = request.form.get("url", "").strip()
     f = request.files.get("file")
-    if not f or not f.filename.lower().endswith(".html"):
-        flash("Please upload an .html file.")
+    has_file = f and f.filename
+    if link and has_file:
+        flash("Give a dashboard either a link or a file upload, not both.")
         return redirect(url_for("home"))
+    if link and not link.startswith(("http://", "https://")):
+        flash("Dashboard link must start with http:// or https://")
+        return redirect(url_for("home"))
+    if not link and not (has_file and f.filename.lower().endswith(".html")):
+        flash("Give a dashboard link, or upload an .html file.")
+        return redirect(url_for("home"))
+
+    stored = ""
     created = datetime.now()
-    stored = f"{created:%Y%m%d%H%M%S%f}_{secure_filename(f.filename)}"
-    f.save(os.path.join(UPLOAD_DIR, stored))
+    if not link:
+        stored = f"{created:%Y%m%d%H%M%S%f}_{secure_filename(f.filename)}"
+        f.save(os.path.join(UPLOAD_DIR, stored))
+
     def _write():
         with db() as conn:
             conn.execute(
-                "INSERT INTO dashboards (title, owner, department, description, filename, created_at) VALUES (?,?,?,?,?,?)",
+                "INSERT INTO dashboards (title, owner, department, description, filename, created_at, url) VALUES (?,?,?,?,?,?,?)",
                 (request.form["title"].strip(), request.form.get("owner", "").strip(),
                  request.form.get("department", "").strip(), request.form.get("description", "").strip(),
-                 stored, created.isoformat(timespec="seconds")),
+                 stored, created.isoformat(timespec="seconds"), link or None),
             )
     run_with_retry(_write)
-    flash("Dashboard uploaded.")
+    flash("Dashboard added.")
     return redirect(url_for("home"))
 
 
